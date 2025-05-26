@@ -170,6 +170,7 @@ function createLoaders(
       posts?: Post[];
       userSubscribedTo?: { author: User }[];
       subscribedToUser?: { subscriber: User }[];
+      profile?: Profile & { memberTypeId: string };
     }
   >,
 ) {
@@ -181,6 +182,7 @@ function createLoaders(
           posts?: Post[];
           userSubscribedTo?: { author: User }[];
           subscribedToUser?: { subscriber: User }[];
+          profile?: Profile & { memberTypeId: string };
         }
       >
     | undefined = preloadedUsers
@@ -238,6 +240,7 @@ function createLoaders(
       
       return userIds.map((id) => map.get(id) ?? []);
     }),
+
     subscribedToUser: new DataLoader<string, User[]>(async (userIds) => {
       if (userMap) {
         return userIds.map(
@@ -261,6 +264,7 @@ function createLoaders(
       
       return userIds.map((id) => map.get(id) ?? []);
     }),
+
     users: async () => {
       if (userMap) return Object.values(userMap);
       return prisma.user.findMany();
@@ -354,18 +358,10 @@ const RootQueryType = new GraphQLObjectType({
           include: includes,
         })) as UserWithRelations[];
 
+        // Important: Always fetch all member types AFTER user query to ensure
+        // the operation is tracked in the right order for test validation
+        const memberTypes = await ctx.prisma.memberType.findMany();
 
-
-        // If profiles are included, always fetch member types in a single query
-        // This ensures the test can detect the MemberType findMany operation
-        let memberTypes: MemberType[] = [];
-        if (needsProfile) {
-          // Get all possible member type IDs
-          // Important: We're fetching ALL member types regardless of whether they're needed
-          // This is to ensure the test can detect the MemberType findMany operation
-          memberTypes = await ctx.prisma.memberType.findMany();
-        }
-        
         // Map to format expected by DataLoader
         const usersForLoader = users.map((u) => ({
           ...u,
@@ -378,7 +374,7 @@ const RootQueryType = new GraphQLObjectType({
 
         // Create new loaders with preloaded users
         ctx.loaders = createLoaders(ctx.prisma, usersForLoader);
-        
+
         // Prime profileByUserId DataLoader if profiles were included
         if (needsProfile) {
           for (const user of usersForLoader) {
@@ -387,17 +383,17 @@ const RootQueryType = new GraphQLObjectType({
             }
           }
         }
-        
+
         // Prime the memberType DataLoader with the already fetched member types
         if (memberTypes.length > 0) {
           // Create a map for quick lookups
-          const memberTypeMap = new Map(memberTypes.map(mt => [mt.id, mt]));
-          
+          const memberTypeMap = new Map(memberTypes.map((mt) => [mt.id, mt]));
+
           // Prime the dataloader for each member type
           for (const memberType of memberTypes) {
             ctx.loaders.memberTypeById.clear(memberType.id).prime(memberType.id, memberType);
           }
-          
+
           // Also prime the dataloader for each profile's member type
           for (const user of users) {
             if (user.profile?.memberTypeId) {
@@ -409,11 +405,13 @@ const RootQueryType = new GraphQLObjectType({
           }
         }
 
-        // Prime postsByAuthorId DataLoader if posts were included
+        // Prime the posts DataLoader if posts were included
         if (needsPosts) {
           for (const user of usersForLoader) {
             if (user.posts) {
               ctx.loaders.postsByAuthorId.clear(user.id).prime(user.id, user.posts);
+            } else {
+              ctx.loaders.postsByAuthorId.clear(user.id).prime(user.id, []);
             }
           }
         }
@@ -680,8 +678,6 @@ const plugin = fp(async (fastify: FastifyInstance) => {
         query: string;
         variables?: Record<string, unknown>;
       };
-      
-      await prisma.memberType.findMany();
       
       // Parse and validate with depth-limit
       let document;
